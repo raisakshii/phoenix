@@ -31,7 +31,7 @@ export class CMSLoader extends PhoenixLoader {
     return configs;
   }
 
-  /**
+/**
    * Read an ".ig" archive file and access the event data through a callback.
    * @param file Path to the ".ig" file or an object of type `File`.
    * @param onFileRead Callback called with an array of event data when the file is read.
@@ -45,47 +45,55 @@ export class CMSLoader extends PhoenixLoader {
     this.loadingManager.addLoadableItem('ig_archive');
     const igArchive = new JSZip();
     const eventsDataInIg: any[] = [];
-    const readArchive = (res: File | ArrayBuffer) => {
-      igArchive.loadAsync(res).then(() => {
+
+    // Refactored to an async function for cleaner control flow
+    const readArchive = async (res: File | ArrayBuffer) => {
+      try {
+        await igArchive.loadAsync(res);
+        
         let allFilesPath = Object.keys(igArchive.files);
+        
         // If the event path or name is given then filter all data to get the required events
         if (eventPathName) {
           allFilesPath = allFilesPath.filter((filePath) =>
             filePath.includes(eventPathName),
           );
         }
-        let i = 1;
-        for (const filePathInIg of allFilesPath) {
+
+        // Map all file paths to an array of asynchronous Promises
+        const filePromises = allFilesPath.map(async (filePathInIg) => {
           // If the files are in the "Events" folder then process them.
           if (filePathInIg.toLowerCase().startsWith('events')) {
-            igArchive
-              ?.file(filePathInIg)!
-              .async('string')
-              .then((singleEvent: string) => {
-                // The data has some inconsistencies which need to be removed to properly parse JSON
-                singleEvent = singleEvent
-                  .replace(/'/g, '"')
-                  .replace(/\(/g, '[')
-                  .replace(/\)/g, ']')
-                  .replace(/nan/g, '0');
-                const eventJSON = JSON.parse(singleEvent);
-                eventJSON.eventPath = filePathInIg;
-                eventsDataInIg.push(eventJSON);
-                if (i === allFilesPath.length) {
-                  onFileRead(eventsDataInIg);
-                  this.loadingManager.itemLoaded('ig_archive');
-                }
-                i++;
-              });
-          } else {
-            if (i === allFilesPath.length) {
-              onFileRead(eventsDataInIg);
-              this.loadingManager.itemLoaded('ig_archive');
-            }
-            i++;
+            const archiveFile = igArchive.file(filePathInIg);
+            if (!archiveFile) return;
+
+            let singleEvent = await archiveFile.async('string');
+            
+            // The data has some inconsistencies which need to be removed to properly parse JSON
+            singleEvent = singleEvent
+              .replace(/'/g, '"')
+              .replace(/\(/g, '[')
+              .replace(/\)/g, ']')
+              .replace(/nan/g, '0');
+              
+            const eventJSON = JSON.parse(singleEvent);
+            eventJSON.eventPath = filePathInIg;
+            eventsDataInIg.push(eventJSON);
           }
-        }
-      });
+        });
+
+        // Wait for EVERY file promise to finish resolving before moving on
+        await Promise.all(filePromises);
+
+        // Fire the callbacks only when we are 100% sure all data is parsed
+        onFileRead(eventsDataInIg);
+        this.loadingManager.itemLoaded('ig_archive');
+
+      } catch (error) {
+        console.error('Error parsing .ig archive:', error);
+        // Ensure the loader doesn't get stuck infinitely if the zip is corrupt
+        this.loadingManager.itemLoaded('ig_archive'); 
+      }
     };
 
     if (file instanceof File) {
@@ -95,6 +103,10 @@ export class CMSLoader extends PhoenixLoader {
         .then((res) => res.arrayBuffer())
         .then((res) => {
           readArchive(res);
+        })
+        .catch((error) => {
+          console.error('Error fetching .ig file:', error);
+          this.loadingManager.itemLoaded('ig_archive');
         });
     }
   }
